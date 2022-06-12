@@ -12,7 +12,7 @@ use uring_sys2::*;
 
 use crate::{
     buf::UringBuf,
-    result::*,
+    handle::{FdatasyncHandle, FsyncHandle, Handle, MadviseHandle, ReadHandle, WriteHandle},
     sqe::{FdatasyncSqe, FsyncSqe, MadviseSqe, ReadSqe, UringOperationKind, UringSqe, WriteSqe},
 };
 
@@ -47,84 +47,6 @@ impl UringState {
 
 struct UringContext<'a> {
     state: RefMut<'a, UringState>,
-}
-
-pub trait Handler<'a>: Into<UringHandle<'a>> {
-    type Output;
-
-    fn wait(self) -> Result<Self::Output>;
-}
-
-macro_rules! define_handle {
-    ($([$var:ident, $h:ident, $result:ident],)*) => {
-        pub enum UringHandle<'a> {
-            $(
-                $var($h<'a>),
-            )*
-        }
-        $(
-            pub struct $h<'a>(Handle<'a>);
-            impl<'a> Into<UringHandle<'a>> for $h<'a> {
-                fn into(self) -> UringHandle<'a> {
-                    UringHandle::$var(self)
-                }
-            }
-            impl<'a> Handler<'a> for $h<'a> {
-                type Output = $result;
-                fn wait(self) -> Result<$result> {
-                    self.0.wait()?.try_into()
-                }
-            }
-        )*
-    }
-}
-
-define_handle!(
-    [Read, ReadHandle, ReadResult],
-    [Write, WriteHandle, WriteResult],
-    [Fsync, FsyncHandle, FsyncResult],
-    [Fdatasync, FdatasyncHandle, FdatasyncResult],
-    [Madvise, MadviseHandle, MadviseResult],
-);
-
-/// General handle for `Uring` operations.
-struct Handle<'a> {
-    id: u64,
-    ring: &'a Uring,
-}
-
-impl<'a> Handle<'a> {
-    fn wait(self) -> Result<(i32, UringOperationKind)> {
-        let mut context = self.ring.context();
-        self.ring.wait_for(&mut context, self.id)?;
-        let op = context
-            .state
-            .map
-            .remove(&self.id)
-            .expect("key must be present");
-        if let OperationStatus::Completed(res) = op.status {
-            Ok((res, op.kind))
-        } else {
-            Err(Error::InternalError(String::from(
-                "trying to convert to result when operation is not finished",
-            )))
-        }
-    }
-}
-
-impl<'a> Drop for Handle<'a> {
-    fn drop(&mut self) {
-        let mut state = self.ring.state.borrow_mut();
-        if let Entry::Occupied(mut op) = state.map.entry(self.id) {
-            // Dropped before waiting on this handle; tell the Uring to ignore the result.
-            match op.get().status {
-                OperationStatus::Completed(_) => {
-                    op.remove();
-                }
-                _ => op.get_mut().status = OperationStatus::Cancelled,
-            }
-        }
-    }
 }
 
 #[derive(Debug, Error)]
@@ -175,27 +97,31 @@ impl Uring {
     ///
     /// Equivalent to `io_uring_prep_read`.
     pub fn read(&self, entry: ReadSqe) -> Result<ReadHandle> {
-        self.prepare(&mut self.context(), entry).map(ReadHandle)
+        self.prepare(&mut self.context(), entry)
+            .map(ReadHandle::new)
     }
 
     /// Prepares for asynchronous `write(2)`.
     ///
     /// Equivalent to `io_uring_prep_write`.
     pub fn write(&self, entry: WriteSqe) -> Result<WriteHandle> {
-        self.prepare(&mut self.context(), entry).map(WriteHandle)
+        self.prepare(&mut self.context(), entry)
+            .map(WriteHandle::new)
     }
 
     pub fn fsync(&self, entry: FsyncSqe) -> Result<FsyncHandle> {
-        self.prepare(&mut self.context(), entry).map(FsyncHandle)
+        self.prepare(&mut self.context(), entry)
+            .map(FsyncHandle::new)
     }
 
     pub fn fdatasync(&self, entry: FdatasyncSqe) -> Result<FdatasyncHandle> {
         self.prepare(&mut self.context(), entry)
-            .map(FdatasyncHandle)
+            .map(FdatasyncHandle::new)
     }
 
     pub fn madvise(&self, entry: MadviseSqe) -> Result<MadviseHandle> {
-        self.prepare(&mut self.context(), entry).map(MadviseHandle)
+        self.prepare(&mut self.context(), entry)
+            .map(MadviseHandle::new)
     }
 
     fn context(&self) -> UringContext {
@@ -314,7 +240,7 @@ impl Uring {
         unsafe {
             io_uring_sqe_set_data64(sqe.as_ptr(), id);
         }
-        Ok(Handle { id, ring: self })
+        Ok(Handle::new(id, self))
     }
 }
 
@@ -343,7 +269,11 @@ impl Drop for Uring {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::sqe::SqeBuilder;
+    use crate::{
+        handle::Handler,
+        result::{BufIoResult, IoResult},
+        sqe::SqeBuilder,
+    };
     use std::{io::Write, os::unix::io::AsRawFd};
 
     #[test]
