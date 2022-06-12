@@ -1,15 +1,25 @@
-use std::borrow::Borrow;
-use std::cell::{RefCell, RefMut, UnsafeCell};
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
-use std::marker::PhantomData;
-use std::mem::MaybeUninit;
-use std::os::unix::io::RawFd;
-use std::ptr::NonNull;
-use std::{io, ptr};
+use std::{
+    cell::{RefCell, RefMut, UnsafeCell},
+    collections::{hash_map::Entry, HashMap},
+    io,
+    mem::MaybeUninit,
+    ptr,
+    ptr::NonNull,
+};
 
 use thiserror::Error;
 use uring_sys2::*;
+
+use crate::{
+    buf::UringBuf,
+    result::*,
+    sqe::{FdatasyncSqe, FsyncSqe, MadviseSqe, ReadSqe, UringOperationKind, UringSqe, WriteSqe},
+};
+
+pub mod buf;
+pub mod handle;
+pub mod result;
+pub mod sqe;
 
 /// liburing interface without `async`.
 pub struct Uring {
@@ -39,60 +49,54 @@ struct UringContext<'a> {
     state: RefMut<'a, UringState>,
 }
 
-pub enum UringBuf {
-    Vec(Vec<u8>),
-    Raw { ptr: *mut u8, len: usize },
-}
+pub struct ReadHandle<'a>(Handle<'a>);
 
-impl UringBuf {
-    fn as_mut_ptr(&mut self) -> *mut u8 {
-        match self {
-            UringBuf::Vec(ref mut v) => v.as_mut_ptr(),
-            UringBuf::Raw { ptr, .. } => *ptr,
-        }
-    }
-
-    fn as_slice(&self) -> &[u8] {
-        match self {
-            UringBuf::Vec(ref v) => v.as_ref(),
-            UringBuf::Raw { ptr, len } => unsafe { std::slice::from_raw_parts(*ptr, *len) },
-        }
-    }
-
-    fn len(&self) -> usize {
-        match self {
-            UringBuf::Vec(ref v) => v.len(),
-            UringBuf::Raw { len, .. } => *len,
-        }
+impl<'a> ReadHandle<'a> {
+    pub fn wait(self) -> Result<ReadResult> {
+        self.0.wait()?.try_into()
     }
 }
 
-pub struct UringResult {
-    res: i32,
-    kind: UringOperationKind,
-}
+pub struct WriteHandle<'a>(Handle<'a>);
 
-impl UringResult {
-    pub fn as_io_error(&self) -> io::Result<()> {
-        if self.res < 0 {
-            Ok(())
-        } else {
-            Err(io::Error::from_raw_os_error(-self.res))
-        }
-    }
-
-    pub fn into_buf(self) -> Option<UringBuf> {
-        self.kind.try_into().ok()
+impl<'a> WriteHandle<'a> {
+    pub fn wait(self) -> Result<WriteResult> {
+        self.0.wait()?.try_into()
     }
 }
 
-pub struct Handle<'a> {
+pub struct FsyncHandle<'a>(Handle<'a>);
+
+impl<'a> FsyncHandle<'a> {
+    pub fn wait(self) -> Result<FsyncResult> {
+        self.0.wait()?.try_into()
+    }
+}
+
+pub struct FdatasyncHandle<'a>(Handle<'a>);
+
+impl<'a> FdatasyncHandle<'a> {
+    pub fn wait(self) -> Result<FdatasyncResult> {
+        self.0.wait()?.try_into()
+    }
+}
+
+pub struct MadviseHandle<'a>(Handle<'a>);
+
+impl<'a> MadviseHandle<'a> {
+    pub fn wait(self) -> Result<MadviseResult> {
+        self.0.wait()?.try_into()
+    }
+}
+
+/// General handle for `Uring` operations.
+struct Handle<'a> {
     id: u64,
     ring: &'a Uring,
 }
 
 impl<'a> Handle<'a> {
-    pub fn wait(mut self) -> Result<UringResult> {
+    fn wait(self) -> Result<(i32, UringOperationKind)> {
         let mut context = self.ring.context();
         self.ring.wait_for(&mut context, self.id)?;
         let op = context
@@ -101,7 +105,7 @@ impl<'a> Handle<'a> {
             .remove(&self.id)
             .expect("key must be present");
         if let OperationStatus::Completed(res) = op.status {
-            Ok(UringResult { res, kind: op.kind })
+            Ok((res, op.kind))
         } else {
             Err(Error::InternalError(String::from(
                 "trying to convert to result when operation is not finished",
@@ -136,7 +140,7 @@ pub enum Error {
     #[error("io_uring_wait_cqe failed")]
     WaitCqeError(#[source] io::Error),
     #[error("internal error: {0}")]
-    InternalError(String),
+    InternalError(String), // FIXME: add internal errors instead of raw strings.
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -172,15 +176,28 @@ impl Uring {
     /// Prepares for asynchronous `read(2)`.
     ///
     /// Equivalent to `io_uring_prep_read`.
-    pub fn read(&self, entry: ReadSqe) -> Result<Handle> {
-        self.prepare(&mut self.context(), entry)
+    pub fn read(&self, entry: ReadSqe) -> Result<ReadHandle> {
+        self.prepare(&mut self.context(), entry).map(ReadHandle)
     }
 
     /// Prepares for asynchronous `write(2)`.
     ///
     /// Equivalent to `io_uring_prep_write`.
-    pub fn write(&self, entry: WriteSqe) -> Result<Handle> {
+    pub fn write(&self, entry: WriteSqe) -> Result<WriteHandle> {
+        self.prepare(&mut self.context(), entry).map(WriteHandle)
+    }
+
+    pub fn fsync(&self, entry: FsyncSqe) -> Result<FsyncHandle> {
+        self.prepare(&mut self.context(), entry).map(FsyncHandle)
+    }
+
+    pub fn fdatasync(&self, entry: FdatasyncSqe) -> Result<FdatasyncHandle> {
         self.prepare(&mut self.context(), entry)
+            .map(FdatasyncHandle)
+    }
+
+    pub fn madvise(&self, entry: MadviseSqe) -> Result<MadviseHandle> {
+        self.prepare(&mut self.context(), entry).map(MadviseHandle)
     }
 
     fn context(&self) -> UringContext {
@@ -303,97 +320,6 @@ impl Uring {
     }
 }
 
-trait UringSqe: Into<UringOperationKind> {
-    fn prepare(&mut self, sqe: NonNull<io_uring_sqe>);
-}
-
-/// SQE for `read`.
-pub struct ReadSqe {
-    flag: u32,
-    data: ReadData,
-}
-
-struct ReadData {
-    fd: RawFd,
-    buf: UringBuf,
-    offset: u64,
-}
-
-impl Into<UringOperationKind> for ReadSqe {
-    fn into(self) -> UringOperationKind {
-        UringOperationKind::Read(self.data)
-    }
-}
-
-impl UringSqe for ReadSqe {
-    fn prepare(&mut self, sqe: NonNull<io_uring_sqe>) {
-        unsafe {
-            io_uring_prep_read(
-                sqe.as_ptr(),
-                self.data.fd,
-                self.data.buf.as_mut_ptr() as *mut _,
-                self.data.buf.len() as u32,
-                self.data.offset,
-            );
-            io_uring_sqe_set_flags(sqe.as_ptr(), self.flag);
-        }
-    }
-}
-
-pub struct WriteSqe {
-    flag: u32,
-    data: WriteData,
-}
-
-impl Into<UringOperationKind> for WriteSqe {
-    fn into(self) -> UringOperationKind {
-        UringOperationKind::Write(self.data)
-    }
-}
-
-impl UringSqe for WriteSqe {
-    fn prepare(&mut self, sqe: NonNull<io_uring_sqe>) {
-        unsafe {
-            io_uring_prep_write(
-                sqe.as_ptr(),
-                self.data.fd,
-                self.data.buf.as_mut_ptr() as *mut _,
-                self.data.buf.len() as u32,
-                self.data.offset,
-            );
-            io_uring_sqe_set_flags(sqe.as_ptr(), self.flag)
-        }
-    }
-}
-
-struct WriteData {
-    fd: RawFd,
-    buf: UringBuf,
-    offset: u64,
-}
-
-pub struct SqeBuilder {
-    flag: u32,
-}
-
-impl SqeBuilder {
-    pub fn new() -> SqeBuilder {
-        SqeBuilder { flag: 0 }
-    }
-
-    pub fn link(&mut self) -> &mut SqeBuilder {
-        self.flag |= IOSQE_IO_LINK;
-        self
-    }
-
-    pub fn read(self, fd: RawFd, buf: UringBuf, offset: u64) -> ReadSqe {
-        ReadSqe {
-            flag: self.flag,
-            data: ReadData { fd, buf, offset },
-        }
-    }
-}
-
 struct UringOperation {
     status: OperationStatus,
     kind: UringOperationKind,
@@ -408,59 +334,6 @@ enum OperationStatus {
     Cancelled,
 }
 
-enum UringOperationKind {
-    /// Asynchronous `read(2)`.
-    ///
-    /// Equivalent to `io_uring_prep_read`.
-    Read(ReadData),
-    /// Asynchronous `write(2).
-    ///
-    /// Equivalent to `io_uring_prep_write`
-    Write(WriteData),
-    /// Asynchronous `fsync(2)`.
-    ///
-    /// Equivalent to `io_uring_prep_fsync`
-    Fsync(FsyncData),
-    /// Asynchronous `fdatasync(2)`.
-    ///
-    /// Equivalent to `io_uring_prep_fsync` with `IORING_FSYNC_DATASYNC`.
-    Fdatasync(FsyncData),
-    /// Asynchronous `madvise(2)`.
-    ///
-    /// Equivalent to `io_uring_prep_madvise`.
-    Madvise(MadviseData),
-}
-
-impl TryInto<UringBuf> for UringOperationKind {
-    type Error = ();
-
-    fn try_into(self) -> std::result::Result<UringBuf, Self::Error> {
-        match self {
-            UringOperationKind::Read(ReadData { buf, .. })
-            | UringOperationKind::Write(WriteData { buf, .. })
-            | UringOperationKind::Madvise(MadviseData { buf, .. }) => Ok(buf),
-            _ => Err(()),
-        }
-    }
-}
-
-/// The advise to `madvise(2)`.
-// FIXME: add more variants.
-#[repr(i32)]
-pub enum Madvise {
-    Normal = libc::MADV_NORMAL,
-    DontNeed = libc::MADV_DONTNEED,
-}
-
-struct MadviseData {
-    buf: UringBuf,
-    advise: Madvise,
-}
-
-struct FsyncData {
-    fd: RawFd,
-}
-
 impl Drop for Uring {
     fn drop(&mut self) {
         let mut context = self.context();
@@ -472,8 +345,8 @@ impl Drop for Uring {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::io::Write;
-    use std::os::unix::io::AsRawFd;
+    use crate::sqe::SqeBuilder;
+    use std::{io::Write, os::unix::io::AsRawFd};
 
     #[test]
     fn test_read() {
@@ -491,8 +364,8 @@ mod test {
 
         for h in handles {
             let result = h.wait().unwrap();
-            let len = result.res as usize;
-            let buf = result.into_buf().unwrap();
+            let len = result.as_io_result().unwrap();
+            let buf = result.into_buf();
             assert_eq!(&buf.as_slice()[..len], s.as_bytes());
         }
     }
