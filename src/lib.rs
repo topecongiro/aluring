@@ -49,45 +49,43 @@ struct UringContext<'a> {
     state: RefMut<'a, UringState>,
 }
 
-pub struct ReadHandle<'a>(Handle<'a>);
+pub trait Handler<'a>: Into<UringHandle<'a>> {
+    type Output;
 
-impl<'a> ReadHandle<'a> {
-    pub fn wait(self) -> Result<ReadResult> {
-        self.0.wait()?.try_into()
+    fn wait(self) -> Result<Self::Output>;
+}
+
+macro_rules! define_handle {
+    ($([$var:ident, $h:ident, $result:ident],)*) => {
+        pub enum UringHandle<'a> {
+            $(
+                $var($h<'a>),
+            )*
+        }
+        $(
+            pub struct $h<'a>(Handle<'a>);
+            impl<'a> Into<UringHandle<'a>> for $h<'a> {
+                fn into(self) -> UringHandle<'a> {
+                    UringHandle::$var(self)
+                }
+            }
+            impl<'a> Handler<'a> for $h<'a> {
+                type Output = $result;
+                fn wait(self) -> Result<$result> {
+                    self.0.wait()?.try_into()
+                }
+            }
+        )*
     }
 }
 
-pub struct WriteHandle<'a>(Handle<'a>);
-
-impl<'a> WriteHandle<'a> {
-    pub fn wait(self) -> Result<WriteResult> {
-        self.0.wait()?.try_into()
-    }
-}
-
-pub struct FsyncHandle<'a>(Handle<'a>);
-
-impl<'a> FsyncHandle<'a> {
-    pub fn wait(self) -> Result<FsyncResult> {
-        self.0.wait()?.try_into()
-    }
-}
-
-pub struct FdatasyncHandle<'a>(Handle<'a>);
-
-impl<'a> FdatasyncHandle<'a> {
-    pub fn wait(self) -> Result<FdatasyncResult> {
-        self.0.wait()?.try_into()
-    }
-}
-
-pub struct MadviseHandle<'a>(Handle<'a>);
-
-impl<'a> MadviseHandle<'a> {
-    pub fn wait(self) -> Result<MadviseResult> {
-        self.0.wait()?.try_into()
-    }
-}
+define_handle!(
+    [Read, ReadHandle, ReadResult],
+    [Write, WriteHandle, WriteResult],
+    [Fsync, FsyncHandle, FsyncResult],
+    [Fdatasync, FdatasyncHandle, FdatasyncResult],
+    [Madvise, MadviseHandle, MadviseResult],
+);
 
 /// General handle for `Uring` operations.
 struct Handle<'a> {
