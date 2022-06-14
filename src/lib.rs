@@ -1,3 +1,23 @@
+//! `liburing` wrapper library without `async`.
+//!
+//! ```rust,no_run
+//! # use std::fs::File;
+//! use aluring::{Uring, sqe::Sqe, buf::UringBuf, sqe::ReadData};
+//!
+//! # fn main() -> anyhow::Result<()> {
+//! # use std::os::unix::io::AsRawFd;
+//! let uring = Uring::new(128)?;
+//! let f = File::open("example.txt")?;
+//! let mut handle = uring.prepare_read(Sqe::new(ReadData {
+//!     fd: f.as_raw_fd(),
+//!     buf: UringBuf::Vec(vec![0; 1024]),
+//!     offset: 0,
+//! }))?;
+//! uring.submit()?;
+//! handle.wait()?;
+//! # Ok(())
+//! # }
+//! ```
 use std::{
     cell::{RefCell, RefMut, UnsafeCell},
     collections::{hash_map::Entry, HashMap},
@@ -12,8 +32,11 @@ use uring_sys2::*;
 
 use crate::{
     buf::UringBuf,
-    handle::{FdatasyncHandle, FsyncHandle, Handle, MadviseHandle, ReadHandle, WriteHandle},
-    sqe::{FdatasyncSqe, FsyncSqe, MadviseSqe, ReadSqe, UringOperationKind, UringSqe, WriteSqe},
+    handle::{FdatasyncHandle, FsyncHandle, Handler, MadviseHandle, ReadHandle, WriteHandle},
+    sqe::{
+        FdatasyncData, FsyncData, MadviseData, ReadData, Sqe, UringOperationKind, UringSqe,
+        WriteData,
+    },
 };
 
 pub mod buf;
@@ -49,6 +72,7 @@ struct UringContext<'a> {
     state: RefMut<'a, UringState>,
 }
 
+/// Errors from [`Uring`](Uring).
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("io_uring_queue_init({1}, 0) failed")]
@@ -96,32 +120,27 @@ impl Uring {
     /// Prepares for asynchronous `read(2)`.
     ///
     /// Equivalent to `io_uring_prep_read`.
-    pub fn read(&self, entry: ReadSqe) -> Result<ReadHandle> {
+    pub fn prepare_read(&self, entry: Sqe<ReadData>) -> Result<ReadHandle> {
         self.prepare(&mut self.context(), entry)
-            .map(ReadHandle::new)
     }
 
     /// Prepares for asynchronous `write(2)`.
     ///
     /// Equivalent to `io_uring_prep_write`.
-    pub fn write(&self, entry: WriteSqe) -> Result<WriteHandle> {
+    pub fn prepare_write(&self, entry: Sqe<WriteData>) -> Result<WriteHandle> {
         self.prepare(&mut self.context(), entry)
-            .map(WriteHandle::new)
     }
 
-    pub fn fsync(&self, entry: FsyncSqe) -> Result<FsyncHandle> {
+    pub fn prepare_fsync(&self, entry: Sqe<FsyncData>) -> Result<FsyncHandle> {
         self.prepare(&mut self.context(), entry)
-            .map(FsyncHandle::new)
     }
 
-    pub fn fdatasync(&self, entry: FdatasyncSqe) -> Result<FdatasyncHandle> {
+    pub fn prepare_fdatasync(&self, entry: Sqe<FdatasyncData>) -> Result<FdatasyncHandle> {
         self.prepare(&mut self.context(), entry)
-            .map(FdatasyncHandle::new)
     }
 
-    pub fn madvise(&self, entry: MadviseSqe) -> Result<MadviseHandle> {
+    pub fn prepare_madvise(&self, entry: Sqe<MadviseData>) -> Result<MadviseHandle> {
         self.prepare(&mut self.context(), entry)
-            .map(MadviseHandle::new)
     }
 
     fn context(&self) -> UringContext {
@@ -225,11 +244,24 @@ impl Uring {
         Ok(submitted)
     }
 
-    fn prepare<T: UringSqe>(&self, context: &mut UringContext, mut uring_sqe: T) -> Result<Handle> {
+    fn prepare<'a, T>(
+        &'a self,
+        context: &mut UringContext,
+        mut uring_sqe: Sqe<T>,
+    ) -> Result<<Sqe<T> as UringSqe<'a>>::Handle>
+    where
+        Sqe<T>: UringSqe<'a>,
+    {
         let sqe = self.sqe(context)?;
-        uring_sqe.prepare(sqe);
         context.state.id_gen += 1;
         let id = context.state.id_gen;
+
+        uring_sqe.prepare(sqe);
+        unsafe {
+            io_uring_sqe_set_flags(sqe.as_ptr(), uring_sqe.flag);
+            io_uring_sqe_set_data64(sqe.as_ptr(), id);
+        }
+
         context.state.map.insert(
             id,
             UringOperation {
@@ -237,10 +269,8 @@ impl Uring {
                 kind: uring_sqe.into(),
             },
         );
-        unsafe {
-            io_uring_sqe_set_data64(sqe.as_ptr(), id);
-        }
-        Ok(Handle::new(id, self))
+
+        Ok(<Sqe<T> as UringSqe<'a>>::Handle::new(id, self))
     }
 }
 
@@ -269,11 +299,7 @@ impl Drop for Uring {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{
-        handle::Handler,
-        result::{BufIoResult, IoResult},
-        sqe::SqeBuilder,
-    };
+    use crate::result::{BufIoResult, IoResult};
     use std::{io::Write, os::unix::io::AsRawFd};
 
     #[test]
@@ -284,9 +310,14 @@ mod test {
         f.write_all(s.as_bytes()).unwrap();
 
         let mut handles = vec![];
-        for i in 0..256 {
-            let sqe = SqeBuilder::new().read(f.as_raw_fd(), UringBuf::Vec(vec![0; 128]), 0);
-            let h = ring.read(sqe).unwrap();
+        for _ in 0..256 {
+            let h = ring
+                .prepare_read(Sqe::new(ReadData {
+                    fd: f.as_raw_fd(),
+                    buf: UringBuf::Vec(vec![0; 128]),
+                    offset: 0,
+                }))
+                .unwrap();
             handles.push(h);
         }
 

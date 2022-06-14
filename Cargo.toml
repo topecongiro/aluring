@@ -11,4 +11,5 @@ uring-sys2 = { git = "https://github.com/topecongiro/uring-sys" }
 thiserror = "1.0.31"
 
 [dev-dependencies]
+anyhow = "1.0.57"
 tempfile = "3.3.0"

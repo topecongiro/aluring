@@ -1,10 +1,18 @@
+//! Buffer for `io_uring`.
+
+/// Buffer for `io_uring`.
 pub enum UringBuf {
+    /// `Vec` from the standard library.
     Vec(Vec<u8>),
+    /// Unmanaged memory region.
+    ///
+    /// User of this library must ensure that the pointed memory region is live
+    /// until the operation completes.
     Raw { ptr: *mut u8, len: usize },
 }
 
 impl UringBuf {
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut u8 {
         match self {
             UringBuf::Vec(ref mut v) => v.as_mut_ptr(),
             UringBuf::Raw { ptr, .. } => *ptr,

@@ -1,22 +1,33 @@
+//! Result of asynchronous operation.
 use std::io;
 
 use crate::{buf::UringBuf, sqe::*, Error};
 
+/// A trait for objects that represent the result of io_uring operations.
 pub trait IoResult: Into<UringResult> {
+    /// The return type of the asynchronous operation.
     type Output;
 
+    /// Converts the result into [`io::Result`](std::io::Result).
     fn as_io_result(&self) -> io::Result<Self::Output>;
 }
 
+/// [`IoResult`](IoResult) for operations that owns the [`UringBuf`](crate::buf::UringBuf).
 pub trait BufIoResult: IoResult {
     fn into_buf(self) -> UringBuf;
 }
 
+/// Result of io_uring operations.
 pub enum UringResult {
+    /// Result of asynchronous `read(2)`.
     Read(ReadResult),
+    /// Result of asynchronous `write(2)`.
     Write(WriteResult),
+    /// Result of asynchronous `fsync(2)`.
     Fsync(FsyncResult),
+    /// Result of asynchronous `fdatasync(2)`.
     Fdatasync(FdatasyncResult),
+    /// Result of asynchronous `madvise(2)`.
     Madvise(MadviseResult),
 }
 
@@ -31,7 +42,8 @@ macro_rules! try_io {
 }
 
 macro_rules! define_buf_io_result {
-    ($result:ident, $variant:ident, $data:ident) => {
+    ($result:ident, $variant:ident, $data:ident, $doc:expr) => {
+        #[doc = $doc]
         pub struct $result {
             buf: UringBuf,
             res: i32,
@@ -82,7 +94,8 @@ macro_rules! define_buf_io_result {
 }
 
 macro_rules! define_empty_io_result {
-    ($result:ident, $variant:ident, $data:ident) => {
+    ($result:ident, $variant:ident, $data:ident, $doc:expr) => {
+        #[doc = $doc]
         pub struct $result {
             res: i32,
         }
@@ -123,8 +136,33 @@ macro_rules! define_empty_io_result {
     };
 }
 
-define_buf_io_result!(MadviseResult, Madvise, MadviseData);
-define_buf_io_result!(ReadResult, Read, ReadData);
-define_buf_io_result!(WriteResult, Write, WriteData);
-define_empty_io_result!(FsyncResult, Fsync, FsyncData);
-define_empty_io_result!(FdatasyncResult, Fdatasync, FsyncData);
+define_buf_io_result!(
+    MadviseResult,
+    Madvise,
+    MadviseData,
+    "Result of asynchronous `madvise(2)`"
+);
+define_buf_io_result!(
+    ReadResult,
+    Read,
+    ReadData,
+    "Result of asynchronous `read(2)`"
+);
+define_buf_io_result!(
+    WriteResult,
+    Write,
+    WriteData,
+    "Result of asynchronous `write(2)`"
+);
+define_empty_io_result!(
+    FsyncResult,
+    Fsync,
+    FsyncData,
+    "Result of asynchronous `fsync(2)`"
+);
+define_empty_io_result!(
+    FdatasyncResult,
+    Fdatasync,
+    FdatasyncData,
+    "Result of asynchronous `fdatasync(2)`"
+);

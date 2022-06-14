@@ -1,54 +1,75 @@
+//! Submission queue entry of `io_uring`.
 use std::{os::unix::io::RawFd, ptr::NonNull};
 
 use uring_sys2::*;
 
-use crate::UringBuf;
+use crate::{
+    handle::Handler, FdatasyncHandle, FsyncHandle, MadviseHandle, ReadHandle, UringBuf, WriteHandle,
+};
 
-pub(crate) trait UringSqe: Into<UringOperationKind> {
+pub(crate) trait UringSqe<'a>: Into<UringOperationKind> {
+    type Handle: Handler<'a>;
+
     fn prepare(&mut self, sqe: NonNull<io_uring_sqe>);
 }
 
-pub struct SqeBuilder {
-    flag: u32,
+/// Submission queue entry (SQE) of `io_uring`.
+pub struct Sqe<T> {
+    pub(crate) flag: u32,
+    pub(crate) data: T,
 }
 
-impl SqeBuilder {
-    pub fn new() -> SqeBuilder {
-        SqeBuilder { flag: 0 }
+/// Data type for io_uring operations.
+pub trait UringData {}
+
+impl<T: UringData> Sqe<T> {
+    /// Creates a new `Sqe`.
+    pub fn new(data: T) -> Sqe<T> {
+        Sqe { flag: 0, data }
     }
 
-    pub fn link(&mut self) -> &mut SqeBuilder {
+    /// Enables drain.
+    pub fn darin(mut self) -> Sqe<T> {
+        self.flag |= IOSQE_IO_DRAIN;
+        self
+    }
+
+    /// Enables link.
+    pub fn link(mut self) -> Sqe<T> {
         self.flag |= IOSQE_IO_LINK;
         self
     }
 
-    pub fn read(self, fd: RawFd, buf: UringBuf, offset: u64) -> ReadSqe {
-        ReadSqe {
-            flag: self.flag,
-            data: ReadData { fd, buf, offset },
-        }
+    /// Enables hard link.
+    pub fn hard_link(mut self) -> Sqe<T> {
+        self.flag |= IOSQE_IO_HARDLINK;
+        self
+    }
+
+    /// Enables skip cqe on success.
+    pub fn skip_cqe_on_success(mut self) -> Sqe<T> {
+        self.flag |= IOSQE_CQE_SKIP_SUCCESS;
+        self
     }
 }
 
-/// SQE for `read`.
-pub struct ReadSqe {
-    flag: u32,
-    data: ReadData,
+/// Input for asynchronous `read(2)`.
+pub struct ReadData {
+    pub fd: RawFd,
+    pub buf: UringBuf,
+    pub offset: u64,
 }
+impl UringData for ReadData {}
 
-pub(crate) struct ReadData {
-    pub(crate) fd: RawFd,
-    pub(crate) buf: UringBuf,
-    pub(crate) offset: u64,
-}
-
-impl Into<UringOperationKind> for ReadSqe {
+impl Into<UringOperationKind> for Sqe<ReadData> {
     fn into(self) -> UringOperationKind {
         UringOperationKind::Read(self.data)
     }
 }
 
-impl UringSqe for ReadSqe {
+impl<'a> UringSqe<'a> for Sqe<ReadData> {
+    type Handle = ReadHandle<'a>;
+
     fn prepare(&mut self, sqe: NonNull<io_uring_sqe>) {
         unsafe {
             io_uring_prep_read(
@@ -58,29 +79,26 @@ impl UringSqe for ReadSqe {
                 self.data.buf.len() as u32,
                 self.data.offset,
             );
-            io_uring_sqe_set_flags(sqe.as_ptr(), self.flag);
         }
     }
 }
 
-pub struct WriteSqe {
-    flag: u32,
-    data: WriteData,
+/// Input for asynchronous `write(2)`.
+pub struct WriteData {
+    pub fd: RawFd,
+    pub buf: UringBuf,
+    pub offset: u64,
 }
+impl UringData for WriteData {}
 
-pub(crate) struct WriteData {
-    pub(crate) fd: RawFd,
-    pub(crate) buf: UringBuf,
-    pub(crate) offset: u64,
-}
-
-impl Into<UringOperationKind> for WriteSqe {
+impl Into<UringOperationKind> for Sqe<WriteData> {
     fn into(self) -> UringOperationKind {
         UringOperationKind::Write(self.data)
     }
 }
 
-impl UringSqe for WriteSqe {
+impl<'a> UringSqe<'a> for Sqe<WriteData> {
+    type Handle = WriteHandle<'a>;
     fn prepare(&mut self, sqe: NonNull<io_uring_sqe>) {
         unsafe {
             io_uring_prep_write(
@@ -95,18 +113,21 @@ impl UringSqe for WriteSqe {
     }
 }
 
-pub struct FsyncSqe {
-    flag: u32,
-    data: FsyncData,
+/// Input for asynchronous `fsync(2)`.
+pub struct FsyncData {
+    pub fd: RawFd,
 }
+impl UringData for FsyncData {}
 
-impl Into<UringOperationKind> for FsyncSqe {
+impl Into<UringOperationKind> for Sqe<FsyncData> {
     fn into(self) -> UringOperationKind {
         UringOperationKind::Fsync(self.data)
     }
 }
 
-impl UringSqe for FsyncSqe {
+impl<'a> UringSqe<'a> for Sqe<FsyncData> {
+    type Handle = FsyncHandle<'a>;
+
     fn prepare(&mut self, sqe: NonNull<io_uring_sqe>) {
         unsafe {
             io_uring_prep_fsync(sqe.as_ptr(), self.data.fd, 0);
@@ -115,18 +136,21 @@ impl UringSqe for FsyncSqe {
     }
 }
 
-pub struct FdatasyncSqe {
-    flag: u32,
-    data: FsyncData,
+/// Input for asynchronous `fdatasync(2)`.
+pub struct FdatasyncData {
+    pub fd: RawFd,
 }
+impl UringData for FdatasyncData {}
 
-impl Into<UringOperationKind> for FdatasyncSqe {
+impl Into<UringOperationKind> for Sqe<FdatasyncData> {
     fn into(self) -> UringOperationKind {
         UringOperationKind::Fdatasync(self.data)
     }
 }
 
-impl UringSqe for FdatasyncSqe {
+impl<'a> UringSqe<'a> for Sqe<FdatasyncData> {
+    type Handle = FdatasyncHandle<'a>;
+
     fn prepare(&mut self, sqe: NonNull<io_uring_sqe>) {
         unsafe {
             io_uring_prep_fsync(sqe.as_ptr(), self.data.fd, IORING_FSYNC_DATASYNC);
@@ -135,22 +159,23 @@ impl UringSqe for FdatasyncSqe {
     }
 }
 
-pub(crate) struct FsyncData {
-    pub(crate) fd: RawFd,
+/// Input for asynchronous `madvise(2)`.
+pub struct MadviseData {
+    pub buf: UringBuf,
+    pub length: i64,
+    pub advise: Madvise,
 }
+impl UringData for MadviseData {}
 
-pub struct MadviseSqe {
-    flag: u32,
-    data: MadviseData,
-}
-
-impl Into<UringOperationKind> for MadviseSqe {
+impl Into<UringOperationKind> for Sqe<MadviseData> {
     fn into(self) -> UringOperationKind {
         UringOperationKind::Madvise(self.data)
     }
 }
 
-impl UringSqe for MadviseSqe {
+impl<'a> UringSqe<'a> for Sqe<MadviseData> {
+    type Handle = MadviseHandle<'a>;
+
     fn prepare(&mut self, sqe: NonNull<io_uring_sqe>) {
         unsafe {
             io_uring_prep_madvise(
@@ -162,12 +187,6 @@ impl UringSqe for MadviseSqe {
             io_uring_sqe_set_flags(sqe.as_ptr(), self.flag);
         }
     }
-}
-
-pub(crate) struct MadviseData {
-    pub(crate) buf: UringBuf,
-    pub(crate) length: i64,
-    pub(crate) advise: Madvise,
 }
 
 /// The advise to `madvise(2)`.
@@ -195,7 +214,7 @@ pub(crate) enum UringOperationKind {
     /// Asynchronous `fdatasync(2)`.
     ///
     /// Equivalent to `io_uring_prep_fsync` with `IORING_FSYNC_DATASYNC`.
-    Fdatasync(FsyncData),
+    Fdatasync(FdatasyncData),
     /// Asynchronous `madvise(2)`.
     ///
     /// Equivalent to `io_uring_prep_madvise`.

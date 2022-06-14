@@ -1,11 +1,12 @@
+//! Handle for an ongoing or completed io_uring operation.
 use std::collections::hash_map::Entry;
 
 use crate::{result::*, Error, OperationStatus, Result, Uring, UringOperationKind};
 
-pub trait Handler<'a>: Into<UringHandle<'a>> {
+pub(crate) trait Handler<'a>: Into<UringHandle<'a>> {
     type Output;
 
-    fn wait(self) -> Result<Self::Output>;
+    fn new(id: u64, ring: &'a Uring) -> Self;
 }
 
 macro_rules! define_handle {
@@ -13,12 +14,19 @@ macro_rules! define_handle {
         /// Generalized `Uring` operation handler.
         pub enum UringHandle<'a> {
             $(
+                #[doc = $doc]
                 $var($h<'a>),
             )*
         }
         $(
             #[doc = $doc]
             pub struct $h<'a>(Handle<'a>);
+            impl<'a> $h<'a> {
+                /// Waits for the asynchronous operation and returns its handle.
+                pub fn wait(self) -> Result<$result> {
+                    self.0.wait()?.try_into()
+                }
+            }
             impl<'a> Into<UringHandle<'a>> for $h<'a> {
                 fn into(self) -> UringHandle<'a> {
                     UringHandle::$var(self)
@@ -26,13 +34,8 @@ macro_rules! define_handle {
             }
             impl<'a> Handler<'a> for $h<'a> {
                 type Output = $result;
-                fn wait(self) -> Result<$result> {
-                    self.0.wait()?.try_into()
-                }
-            }
-            impl<'a> $h<'a> {
-                pub(crate) fn new(handler: Handle<'a>) -> Self {
-                    $h(handler)
+                fn new(id: u64, ring: &'a Uring) -> Self {
+                    $h(Handle::new(id, ring))
                 }
             }
         )*
