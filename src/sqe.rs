@@ -29,7 +29,7 @@ impl<T: UringData> Sqe<T> {
     }
 
     /// Enables drain.
-    pub fn darin(mut self) -> Sqe<T> {
+    pub fn drain(mut self) -> Sqe<T> {
         self.flag |= IOSQE_IO_DRAIN;
         self
     }
@@ -108,7 +108,6 @@ impl<'a> UringSqe<'a> for Sqe<WriteData> {
                 self.data.buf.len() as u32,
                 self.data.offset,
             );
-            io_uring_sqe_set_flags(sqe.as_ptr(), self.flag)
         }
     }
 }
@@ -131,7 +130,6 @@ impl<'a> UringSqe<'a> for Sqe<FsyncData> {
     fn prepare(&mut self, sqe: NonNull<io_uring_sqe>) {
         unsafe {
             io_uring_prep_fsync(sqe.as_ptr(), self.data.fd, 0);
-            io_uring_sqe_set_flags(sqe.as_ptr(), self.flag);
         }
     }
 }
@@ -154,7 +152,6 @@ impl<'a> UringSqe<'a> for Sqe<FdatasyncData> {
     fn prepare(&mut self, sqe: NonNull<io_uring_sqe>) {
         unsafe {
             io_uring_prep_fsync(sqe.as_ptr(), self.data.fd, IORING_FSYNC_DATASYNC);
-            io_uring_sqe_set_flags(sqe.as_ptr(), self.flag);
         }
     }
 }
@@ -184,7 +181,6 @@ impl<'a> UringSqe<'a> for Sqe<MadviseData> {
                 self.data.length,
                 self.data.advise as i32,
             );
-            io_uring_sqe_set_flags(sqe.as_ptr(), self.flag);
         }
     }
 }

@@ -1,7 +1,7 @@
 //! Handle for an ongoing or completed io_uring operation.
 use std::collections::hash_map::Entry;
 
-use crate::{result::*, Error, OperationStatus, Result, Uring, UringOperationKind};
+use crate::{result::*, OperationStatus, Result, Uring, UringOperation, UringOperationKind};
 
 pub(crate) trait Handler<'a>: Into<UringHandle<'a>> {
     type Output;
@@ -25,6 +25,11 @@ macro_rules! define_handle {
                 /// Waits for the asynchronous operation and returns its handle.
                 pub fn wait(self) -> Result<$result> {
                     self.0.wait()?.try_into()
+                }
+
+                /// Returns true if the result is already observed.
+                pub fn observed(&self) -> bool {
+                    self.0.observed()
                 }
             }
             impl<'a> Into<UringHandle<'a>> for $h<'a> {
@@ -71,20 +76,46 @@ impl<'a> Handle<'a> {
         Handle { id, ring }
     }
 
+    fn observed(&self) -> bool {
+        self.ring
+            .state
+            .borrow()
+            .map
+            .get(&self.id)
+            .map(|e| match e.status {
+                OperationStatus::Completed(_) => true,
+                _ => false,
+            })
+            .unwrap_or(false)
+    }
+
     fn wait(self) -> Result<(i32, UringOperationKind)> {
         let mut context = self.ring.context();
-        self.ring.wait_for(&mut context, self.id)?;
-        let op = context
-            .state
-            .map
-            .remove(&self.id)
-            .expect("key must be present");
-        if let OperationStatus::Completed(res) = op.status {
-            Ok((res, op.kind))
-        } else {
-            Err(Error::InternalError(String::from(
-                "trying to convert to result when operation is not finished",
-            )))
+        match context.state.map.entry(self.id) {
+            Entry::Occupied(op) => match op.get() {
+                UringOperation {
+                    status: OperationStatus::Completed(res),
+                    ..
+                } => {
+                    let res = *res;
+                    let op = op.remove();
+                    Ok((res, op.kind))
+                }
+                _ => {
+                    self.ring.wait_for(&mut context, self.id)?;
+                    match context.state.map.remove(&self.id) {
+                        Some(UringOperation {
+                            kind,
+                            status: OperationStatus::Completed(res),
+                        }) => Ok((res, kind)),
+                        _ => unreachable!(
+                            "no completed entry for {} in state after `wait_for`",
+                            self.id
+                        ),
+                    }
+                }
+            },
+            _ => unreachable!("no entry for {} in state", self.id),
         }
     }
 }
