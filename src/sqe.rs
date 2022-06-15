@@ -159,7 +159,6 @@ impl<'a> UringSqe<'a> for Sqe<FdatasyncData> {
 /// Input for asynchronous `madvise(2)`.
 pub struct MadviseData {
     pub buf: UringBuf,
-    pub length: i64,
     pub advise: Madvise,
 }
 impl UringData for MadviseData {}
@@ -178,7 +177,7 @@ impl<'a> UringSqe<'a> for Sqe<MadviseData> {
             io_uring_prep_madvise(
                 sqe.as_ptr(),
                 self.data.buf.as_mut_ptr() as *mut _,
-                self.data.length,
+                self.data.buf.len() as i64,
                 self.data.advise as i32,
             );
         }
