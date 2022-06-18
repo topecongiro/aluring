@@ -28,6 +28,46 @@ impl<T: UringData> Sqe<T> {
         Sqe { flag: 0, data }
     }
 
+    /// Creates a new `Sqe` for `read(2)`.
+    pub fn read(fd: RawFd, buf: UringBuf, offset: u64) -> Sqe<ReadData> {
+        Sqe {
+            flag: 0,
+            data: ReadData { fd, buf, offset },
+        }
+    }
+
+    /// Creates a new `Sqe` for `write(2)`.
+    pub fn write(fd: RawFd, buf: UringBuf, offset: u64) -> Sqe<WriteData> {
+        Sqe {
+            flag: 0,
+            data: WriteData { fd, buf, offset },
+        }
+    }
+
+    /// Creates a new `Sqe` for `madvise(2)`.
+    pub fn madvise(buf: UringBuf, advise: Madvise) -> Sqe<MadviseData> {
+        Sqe {
+            flag: 0,
+            data: MadviseData { buf, advise },
+        }
+    }
+
+    /// Creates a new `Sqe` for `fsync(2)`.
+    pub fn fsync(fd: RawFd) -> Sqe<FsyncData> {
+        Sqe {
+            flag: 0,
+            data: FsyncData { fd },
+        }
+    }
+
+    /// Creates a new `Sqe` for `fdatasync(2)`.
+    pub fn fdatasync(fd: RawFd) -> Sqe<FdatasyncData> {
+        Sqe {
+            flag: 0,
+            data: FdatasyncData { fd },
+        }
+    }
+
     /// Enables drain.
     pub fn drain(mut self) -> Sqe<T> {
         self.flag |= IOSQE_IO_DRAIN;
