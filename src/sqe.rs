@@ -22,12 +22,7 @@ pub struct Sqe<T> {
 /// Data type for io_uring operations.
 pub trait UringData {}
 
-impl<T: UringData> Sqe<T> {
-    /// Creates a new `Sqe`.
-    pub fn new(data: T) -> Sqe<T> {
-        Sqe { flag: 0, data }
-    }
-
+impl Sqe<ReadData> {
     /// Creates a new `Sqe` for `read(2)`.
     pub fn read(fd: RawFd, buf: UringBuf, offset: u64) -> Sqe<ReadData> {
         Sqe {
@@ -35,7 +30,9 @@ impl<T: UringData> Sqe<T> {
             data: ReadData { fd, buf, offset },
         }
     }
+}
 
+impl Sqe<WriteData> {
     /// Creates a new `Sqe` for `write(2)`.
     pub fn write(fd: RawFd, buf: UringBuf, offset: u64) -> Sqe<WriteData> {
         Sqe {
@@ -43,7 +40,9 @@ impl<T: UringData> Sqe<T> {
             data: WriteData { fd, buf, offset },
         }
     }
+}
 
+impl Sqe<MadviseData> {
     /// Creates a new `Sqe` for `madvise(2)`.
     pub fn madvise(buf: UringBuf, advise: Madvise) -> Sqe<MadviseData> {
         Sqe {
@@ -51,7 +50,9 @@ impl<T: UringData> Sqe<T> {
             data: MadviseData { buf, advise },
         }
     }
+}
 
+impl Sqe<FsyncData> {
     /// Creates a new `Sqe` for `fsync(2)`.
     pub fn fsync(fd: RawFd) -> Sqe<FsyncData> {
         Sqe {
@@ -59,13 +60,22 @@ impl<T: UringData> Sqe<T> {
             data: FsyncData { fd },
         }
     }
+}
 
+impl Sqe<FdatasyncData> {
     /// Creates a new `Sqe` for `fdatasync(2)`.
     pub fn fdatasync(fd: RawFd) -> Sqe<FdatasyncData> {
         Sqe {
             flag: 0,
             data: FdatasyncData { fd },
         }
+    }
+}
+
+impl<T: UringData> Sqe<T> {
+    /// Creates a new `Sqe`.
+    pub fn new(data: T) -> Sqe<T> {
+        Sqe { flag: 0, data }
     }
 
     /// Enables drain.
@@ -254,4 +264,18 @@ pub(crate) enum UringOperationKind {
     ///
     /// Equivalent to `io_uring_prep_madvise`.
     Madvise(MadviseData),
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_sqe() {
+        let _sqe = Sqe::read(0, UringBuf::Vec(vec![]), 0);
+        let _sqe = Sqe::write(0, UringBuf::Vec(vec![]), 0);
+        let _sqe = Sqe::madvise(UringBuf::Vec(vec![]), Madvise::DontNeed);
+        let _sqe = Sqe::fsync(0);
+        let _sqe = Sqe::fdatasync(0);
+    }
 }
